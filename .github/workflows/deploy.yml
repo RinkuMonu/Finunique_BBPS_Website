@@ -1,4 +1,4 @@
-name: Deploy React App to CWP
+name: Deploy finuniques.in React Build to AWS EC2
 
 on:
   push:
@@ -10,42 +10,73 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      # 1. pull latest source
+      - name: 📥 Checkout code
         uses: actions/checkout@v3
 
-      - name: Setup Node.js
+      # 2. Node env set
+      - name: 🛠 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install Dependencies & Build
+      # 3. Install & Build React (CRA)
+      # CI=false => warnings pe build fail na ho
+      - name: 🏗 Build React App
         run: |
-          npm install
-          CI=false npm run build   # 👈 CI=false taaki warnings build ko fail na kare
+          npm install --legacy-peer-deps
+          CI=false npm run build
 
-      - name: Zip build files
+      # 4. Bundle only the final static site
+      - name: 📦 Create tar from build/
         run: |
-          tar -czvf build.tar.gz -C build .
+          tar -czvf finuniques_build.tar.gz -C build .
 
-      - name: Copy Zip to Server via SCP
+      # 5. Upload tar.gz to EC2 (root login via SSH key)
+      - name: 🚀 Upload artifact to EC2
         uses: appleboy/scp-action@master
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22527
-          source: "build.tar.gz"
-          target: "/home/finuniqu/"
+          host: ${{ secrets.AWS_SSH_HOST }}
+          username: ${{ secrets.AWS_SSH_USER }}
+          port: ${{ secrets.AWS_SSH_PORT }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          source: "finuniques_build.tar.gz"
+          target: "/var/www/"
 
-      - name: Unzip files on Server via SSH
+      # 6. SSH into EC2 → backup old site → replace with new build → fix owner
+      - name: 🔄 Deploy on EC2
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22527
+          host: ${{ secrets.AWS_SSH_HOST }}
+          username: ${{ secrets.AWS_SSH_USER }}
+          port: ${{ secrets.AWS_SSH_PORT }}
+          key: ${{ secrets.AWS_SSH_KEY }}
           script: |
-            rm -rf /home/finuniqu/public_html/*
-            mkdir -p /home/finuniqu/public_html
-            tar -xzvf /home/finuniqu/build.tar.gz -C /home/finuniqu/public_html
-            rm /home/finuniqu/build.tar.gz
+            set -e
+
+            WEBROOT=/var/www/finuniques.in
+            BACKUP_DIR=/var/www/finuniques_backups
+            TARBALL=/var/www/finuniques_build.tar.gz
+
+            echo "📂 Making backup dir if not exists"
+            mkdir -p $BACKUP_DIR
+
+            echo "🗄 Taking timestamped backup of current live site"
+            timestamp=$(date +%Y%m%d_%H%M%S)
+            if [ -d "$WEBROOT" ]; then
+              cp -r $WEBROOT $BACKUP_DIR/finuniques_$timestamp || true
+            fi
+
+            echo "🧼 Cleaning old files from live webroot"
+            rm -rf $WEBROOT/*
+            
+            echo "📦 Extracting new build to live webroot"
+            tar -xzvf $TARBALL -C $WEBROOT
+
+            echo "🧹 Removing uploaded tar"
+            rm $TARBALL
+
+            echo "🔐 Setting correct ownership for nginx"
+            chown -R nginx:nginx $WEBROOT
+
+            echo "✅ Deploy complete for finuniques.in"
